@@ -24,16 +24,9 @@ Run the script to download the term dates from the Penrice Academy website and g
 python generate_ics.py
 ```
 
-### St Mewan Parish Council Meetings
-
-The original scraper for St Mewan Parish Council is kept as `stmewan_generate_ics.py` and produces `stmewan.ics`:
-
-```bash
-python stmewan_generate_ics.py
-```
 
 ## How it works
 
 Each script downloads the relevant web page, parses the event information using **BeautifulSoup** and writes one calendar entry per event using standard iCalendar syntax.
 
-Example calendar files (`penrice.ics` and `stmewan.ics`) are included for reference.
+Example calendar files (`penrice.ics`) are included for reference.
