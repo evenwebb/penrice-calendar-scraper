@@ -20,7 +20,7 @@ CREATE_SCRAPED_EVENTS = True
 CREATE_HOLIDAY_EVENTS = True
 
 # Comma separated words that should be Title Cased in event summaries.
-TITLECASE_WORDS = [w.strip() for w in "term,holiday,half".split(",")]
+TITLECASE_WORDS = [w.strip() for w in "term,holiday,half,INSET".split(",")]
 
 DATE_RE = re.compile(r"(?P<day>\d{1,2})(?:st|nd|rd|th)? (?P<month>[A-Za-z]+) (?P<year>\d{4})")
 
