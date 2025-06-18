@@ -63,12 +63,18 @@ def parse_event_line(line: str) -> list[tuple[datetime.date, datetime.date, str]
 
 
 def make_ics_event(start: datetime.date, end: datetime.date, summary: str) -> str:
+    """Return an iCalendar VEVENT string with a prefixed summary."""
+
+    # All summaries should clearly indicate the source of the event.  Prefix
+    # each event title with "Penrice" before writing it to the calendar file.
+    prefixed_summary = f"Penrice {summary}".strip()
+
     dtend = end + datetime.timedelta(days=1)
     return (
         "BEGIN:VEVENT\n"
         f"DTSTART;VALUE=DATE:{start.strftime('%Y%m%d')}\n"
         f"DTEND;VALUE=DATE:{dtend.strftime('%Y%m%d')}\n"
-        f"SUMMARY:{summary}\n"
+        f"SUMMARY:{prefixed_summary}\n"
         "END:VEVENT\n"
     )
 
