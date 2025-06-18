@@ -1,4 +1,4 @@
-# Calendar Scrapers
+# Penrice Academy Calendar Scraper
 
 This repository provides small Python scripts that fetch event dates from web pages and build iCalendar (`.ics`) files. The calendars can be imported into any application that supports the iCalendar format.
 
