@@ -1,7 +1,16 @@
 import re
 import datetime
+import logging
+
 import requests
 from bs4 import BeautifulSoup
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+error_handler = logging.FileHandler("log.txt")
+error_handler.setLevel(logging.ERROR)
+logger.addHandler(error_handler)
 
 URL = "https://www.penriceacademy.org/term-dates"
 
@@ -13,9 +22,18 @@ def parse_date(text: str) -> datetime.date | None:
     if not match:
         return None
     day = int(match.group("day"))
-    month = datetime.datetime.strptime(match.group("month"), "%B").month
+    month_str = match.group("month")
+    try:
+        month = datetime.datetime.strptime(month_str, "%B").month
+    except ValueError:
+        logger.error("Unrecognised month '%s' in line: %s", month_str, text)
+        return None
     year = int(match.group("year"))
-    return datetime.date(year, month, day)
+    try:
+        return datetime.date(year, month, day)
+    except ValueError:
+        logger.error("Invalid date detected in line: %s", text)
+        return None
 
 
 def extract_lines() -> list[str]:
@@ -30,8 +48,12 @@ def extract_lines() -> list[str]:
         text = p.get_text("\n")
         for line in text.split("\n"):
             line = line.strip()
-            if line:
-                lines.append(line)
+            if not line:
+                continue
+            lower_line = line.lower()
+            if any(word in lower_line for word in ("privacy", "cookies", "updated")):
+                continue
+            lines.append(line)
     return lines
 
 
@@ -46,18 +68,24 @@ def parse_event_line(line: str) -> list[tuple[datetime.date, datetime.date, str]
     events: list[tuple[datetime.date, datetime.date, str]] = []
     if len(matches) == 1:
         d = parse_date(matches[0].group(0))
-        if d:
-            events.append((d, d, summary))
+        if not d:
+            logger.error("Could not parse date from line: %s", line)
+            return []
+        events.append((d, d, summary))
     elif " & " in line and len(matches) == 2:
         for m in matches:
             d = parse_date(m.group(0))
-            if d:
-                events.append((d, d, summary))
+            if not d:
+                logger.error("Could not parse date from line: %s", line)
+                return []
+            events.append((d, d, summary))
     else:
         start_date = parse_date(matches[0].group(0))
         end_date = parse_date(matches[1].group(0))
-        if start_date and end_date:
-            events.append((start_date, end_date, summary))
+        if not start_date or not end_date:
+            logger.error("Could not parse date range from line: %s", line)
+            return []
+        events.append((start_date, end_date, summary))
 
     return events
 
