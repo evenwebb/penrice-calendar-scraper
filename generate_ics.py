@@ -14,6 +14,14 @@ logger.addHandler(error_handler)
 
 URL = "https://www.penriceacademy.org/term-dates"
 
+# Toggle generation of scraped events (directly parsed from the website).
+CREATE_SCRAPED_EVENTS = True
+# Toggle generation of inferred holiday breaks between term dates.
+CREATE_HOLIDAY_EVENTS = True
+
+# Comma separated words that should be Title Cased in event summaries.
+TITLECASE_WORDS = [w.strip() for w in "term,holiday,half".split(",")]
+
 DATE_RE = re.compile(r"(?P<day>\d{1,2})(?:st|nd|rd|th)? (?P<month>[A-Za-z]+) (?P<year>\d{4})")
 
 
@@ -90,8 +98,18 @@ def parse_event_line(line: str) -> list[tuple[datetime.date, datetime.date, str]
     return events
 
 
+def _apply_titlecase(summary: str) -> str:
+    """Return summary with configured words converted to Title Case."""
+    if not TITLECASE_WORDS:
+        return summary
+    pattern = re.compile(r"\b(" + "|".join(map(re.escape, TITLECASE_WORDS)) + r")\b", re.IGNORECASE)
+    return pattern.sub(lambda m: m.group(0).title(), summary)
+
+
 def make_ics_event(start: datetime.date, end: datetime.date, summary: str) -> str:
     """Return an iCalendar VEVENT string with a prefixed summary."""
+
+    summary = _apply_titlecase(summary)
 
     # All summaries should clearly indicate the source of the event.  Prefix
     # each event title with "Penrice" before writing it to the calendar file.
@@ -108,15 +126,30 @@ def make_ics_event(start: datetime.date, end: datetime.date, summary: str) -> st
 
 
 def guess_holiday_name(start: datetime.date, end: datetime.date) -> str:
+<<<<<<< 3oid1f-codex/create-multi-day/week-holiday-events
+    """Return a holiday name based on the month of the break."""
+    if start.month in {12, 1}:
+        return "Christmas Holidays"
+=======
     """Return a holiday name based on the start month."""
     if start.month in {12, 1}:
         return "Christmas Holiday"
+>>>>>>> main
     if start.month == 2:
         return "Spring Half Term"
     if start.month in {3, 4}:
         return "Easter Holiday"
+<<<<<<< 3oid1f-codex/create-multi-day/week-holiday-events
+    if start.month in {5, 6}:
+        return "Summer Half Term"
+    if start.month in {7, 8}:
+        return "Summer Holidays"
+    if start.month in {10, 11}:
+        return "Autumn Half Term"
+=======
     if start.month >= 7:
         return "Summer Holiday"
+>>>>>>> main
     return "Holiday"
 
 
@@ -160,7 +193,16 @@ def main() -> None:
                 elif start.month in {10, 11}:
                     summary = summary.replace("Half Term", "Autumn Half Term")
             parsed.append((start, end, summary))
+<<<<<<< 3oid1f-codex/create-multi-day/week-holiday-events
+            if CREATE_SCRAPED_EVENTS:
+                events.append(make_ics_event(start, end, summary))
+
+    if CREATE_HOLIDAY_EVENTS:
+        for hstart, hend, hname in infer_holidays(parsed):
+            events.append(make_ics_event(hstart, hend, hname))
+=======
             events.append(make_ics_event(start, end, summary))
+>>>>>>> main
 
     for hstart, hend, hname in infer_holidays(parsed):
         events.append(make_ics_event(hstart, hend, hname))
