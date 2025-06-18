@@ -35,7 +35,7 @@ The script prints a confirmation message and writes the calendar file.  A portio
 BEGIN:VEVENT
 DTSTART;VALUE=DATE:20240902
 DTEND;VALUE=DATE:20240905
-SUMMARY:Staff Inset Days (Students not required to attend)
+SUMMARY:Penrice Staff Inset Days (Students not required to attend)
 END:VEVENT
 ```
 
