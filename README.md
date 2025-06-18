@@ -51,6 +51,10 @@ If the academy website changes or you would like to adapt the scraper for a diff
 1. Update the ``URL`` constant to point at the new term dates page.
 2. Adjust ``extract_lines`` and ``parse_event_line`` to match the structure of the new content.
 3. Optionally tweak ``make_ics_event`` to alter how events are formatted.
+4. Set ``CREATE_SCRAPED_EVENTS`` or ``CREATE_HOLIDAY_EVENTS`` to ``False`` if you
+   only want one type of event written to the calendar.
+5. Edit ``TITLECASE_WORDS`` to include any words that should always appear in
+   Title Case within event summaries.
 
 An example ``penrice.ics`` generated from the current site is included for reference.
 
