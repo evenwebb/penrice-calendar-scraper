@@ -107,12 +107,63 @@ def make_ics_event(start: datetime.date, end: datetime.date, summary: str) -> st
     )
 
 
+def guess_holiday_name(start: datetime.date, end: datetime.date) -> str:
+    """Return a holiday name based on the start month."""
+    if start.month in {12, 1}:
+        return "Christmas Holiday"
+    if start.month == 2:
+        return "Spring Half Term"
+    if start.month in {3, 4}:
+        return "Easter Holiday"
+    if start.month >= 7:
+        return "Summer Holiday"
+    return "Holiday"
+
+
+def infer_holidays(events: list[tuple[datetime.date, datetime.date, str]]) -> list[tuple[datetime.date, datetime.date, str]]:
+    """Infer holiday periods from End of Term and Term Begins events."""
+    sorted_events = sorted(events, key=lambda e: e[0])
+    holidays: list[tuple[datetime.date, datetime.date, str]] = []
+    for i, (start_d, end_d, summary) in enumerate(sorted_events):
+        if "End of Term" not in summary:
+            continue
+        next_start = None
+        for j in range(i + 1, len(sorted_events)):
+            ns, _, ns_summary = sorted_events[j]
+            if "Term Begins" in ns_summary:
+                next_start = ns
+                break
+        if next_start:
+            hol_start = end_d + datetime.timedelta(days=1)
+            hol_end = next_start - datetime.timedelta(days=1)
+            if hol_start <= hol_end:
+                name = guess_holiday_name(hol_start, hol_end)
+                holidays.append((hol_start, hol_end, name))
+    return holidays
+
+
 def main() -> None:
     lines = extract_lines()
     events: list[str] = []
+    parsed: list[tuple[datetime.date, datetime.date, str]] = []
     for line in lines:
         for start, end, summary in parse_event_line(line):
+            if "Half Term" in summary and start == end:
+                week_start = start - datetime.timedelta(days=start.weekday())
+                end = week_start + datetime.timedelta(days=4)
+                start = week_start
+            if "Half Term" in summary:
+                if start.month == 2:
+                    summary = summary.replace("Half Term", "Spring Half Term")
+                elif start.month in {5, 6}:
+                    summary = summary.replace("Half Term", "Summer Half Term")
+                elif start.month in {10, 11}:
+                    summary = summary.replace("Half Term", "Autumn Half Term")
+            parsed.append((start, end, summary))
             events.append(make_ics_event(start, end, summary))
+
+    for hstart, hend, hname in infer_holidays(parsed):
+        events.append(make_ics_event(hstart, hend, hname))
 
     ical = (
         "BEGIN:VCALENDAR\n"
