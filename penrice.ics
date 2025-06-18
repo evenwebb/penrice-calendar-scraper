@@ -70,7 +70,7 @@ END:VEVENT
 BEGIN:VEVENT
 DTSTART;VALUE=DATE:20250623
 DTEND;VALUE=DATE:20250624
-SUMMARY:Penrice Staff INSET Days (Students not required to attend)
+SUMMARY:Penrice Staff Inset Days (Students not required to attend)
 END:VEVENT
 BEGIN:VEVENT
 DTSTART;VALUE=DATE:20250721
@@ -145,7 +145,7 @@ END:VEVENT
 BEGIN:VEVENT
 DTSTART;VALUE=DATE:20260703
 DTEND;VALUE=DATE:20260704
-SUMMARY:Penrice Staff INSET Day (Students not required to attend)
+SUMMARY:Penrice Staff Inset Day (Students not required to attend)
 END:VEVENT
 BEGIN:VEVENT
 DTSTART;VALUE=DATE:20260724
