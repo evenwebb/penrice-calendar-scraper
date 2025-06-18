@@ -72,6 +72,9 @@ def parse_event_line(line: str) -> list[tuple[datetime.date, datetime.date, str]
         return []
 
     summary = line[matches[-1].end():].strip(" -\u2013")
+    # Remove any trailing "Begins at 3:00pm" text which occasionally appears
+    # on the Penrice website to indicate an early finish before a break.
+    summary = re.sub(r"\s*Begins at 3:00pm\.?$", "", summary, flags=re.IGNORECASE)
 
     events: list[tuple[datetime.date, datetime.date, str]] = []
     if len(matches) == 1:
@@ -170,7 +173,11 @@ def main() -> None:
     parsed: list[tuple[datetime.date, datetime.date, str]] = []
     for line in lines:
         for start, end, summary in parse_event_line(line):
-            if "Half Term" in summary and start == end:
+            if (
+                "Half Term" in summary
+                and start == end
+                and "Begins at 3:00pm" not in line
+            ):
                 week_start = start - datetime.timedelta(days=start.weekday())
                 end = week_start + datetime.timedelta(days=4)
                 start = week_start
