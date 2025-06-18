@@ -44,6 +44,19 @@ SUMMARY:Penrice Staff Inset Days (Students not required to attend)
 END:VEVENT
 ```
 
+## Configuration
+
+Several options near the top of `generate_ics.py` control how the
+calendar is produced:
+
+| Option | Default | Purpose |
+| ------ | ------- | ------- |
+| `URL` | `"https://www.penriceacademy.org/term-dates"` | Page to scrape for term dates. |
+| `CREATE_SCRAPED_EVENTS` | `True` | Include events parsed directly from the website. |
+| `CREATE_HOLIDAY_EVENTS` | `True` | Infer and add holiday breaks between terms. |
+| `TITLECASE_WORDS` | `"term,holiday,half,INSET"` | Comma separated words that will always appear in Title Case. |
+
+
 ## Customisation
 
 If the academy website changes or you would like to adapt the scraper for a different school, edit ``generate_ics.py``:
