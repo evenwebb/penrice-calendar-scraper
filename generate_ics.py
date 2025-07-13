@@ -4,6 +4,7 @@ import logging
 
 import requests
 from bs4 import BeautifulSoup
+import time
 
 
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +24,22 @@ CREATE_HOLIDAY_EVENTS = True
 TITLECASE_WORDS = [w.strip() for w in "term,holiday,half,INSET".split(",")]
 
 DATE_RE = re.compile(r"(?P<day>\d{1,2})(?:st|nd|rd|th)? (?P<month>[A-Za-z]+) (?P<year>\d{4})")
+
+
+def fetch_with_retries(url: str, retries: int = 3, timeout: int = 60) -> requests.Response:
+    """Return HTTP response, retrying with exponential backoff on errors."""
+    delay = 1
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except requests.RequestException as exc:
+            logger.warning("Attempt %d failed: %s", attempt + 1, exc)
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 def parse_date(text: str) -> datetime.date | None:
@@ -45,8 +62,7 @@ def parse_date(text: str) -> datetime.date | None:
 
 
 def extract_lines() -> list[str]:
-    response = requests.get(URL, timeout=20)
-    response.raise_for_status()
+    response = fetch_with_retries(URL)
     soup = BeautifulSoup(response.text, "html.parser")
     content = soup.select_one("section.user-content")
     lines: list[str] = []
