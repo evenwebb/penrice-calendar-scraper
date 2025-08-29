@@ -13,7 +13,7 @@ error_handler = logging.FileHandler("log.txt")
 error_handler.setLevel(logging.ERROR)
 logger.addHandler(error_handler)
 
-URL = "https://www.penriceacademy.org/term-dates"
+URL = "https://www.penriceacademy.org/page/?title=Term+Dates&pid=49"
 
 # Toggle generation of scraped events (directly parsed from the website).
 CREATE_SCRAPED_EVENTS = True
@@ -23,7 +23,8 @@ CREATE_HOLIDAY_EVENTS = True
 # Comma separated words that should be Title Cased in event summaries.
 TITLECASE_WORDS = [w.strip() for w in "term,holiday,half,INSET".split(",")]
 
-DATE_RE = re.compile(r"(?P<day>\d{1,2})(?:st|nd|rd|th)? (?P<month>[A-Za-z]+) (?P<year>\d{4})")
+DATE_RE = re.compile(r"(?P<day>\d{1,2})(?:st|nd|rd|th)?\s+(?P<month>[A-Za-z]+)\s+(?P<year>\d{4})")
+MONTH_NAMES = [datetime.date(2000, m, 1).strftime("%B").lower() for m in range(1, 13)]
 
 
 def fetch_with_retries(url: str, retries: int = 3, timeout: int = 60) -> requests.Response:
@@ -65,6 +66,8 @@ def extract_lines() -> list[str]:
     response = fetch_with_retries(URL)
     soup = BeautifulSoup(response.text, "html.parser")
     content = soup.select_one("section.user-content")
+    if not content:
+        content = soup.select_one("div.content__region")
     lines: list[str] = []
     if not content:
         return lines
@@ -98,6 +101,15 @@ def parse_event_line(line: str) -> list[tuple[datetime.date, datetime.date, str]
         if not d:
             logger.error("Could not parse date from line: %s", line)
             return []
+        pre = line[:matches[0].start()]
+        left_part = pre.split("-")[0]
+        if "-" in pre and not any(m in left_part.lower() for m in MONTH_NAMES):
+            day_match = re.search(r"(\d{1,2})(?:st|nd|rd|th)?", left_part)
+            if day_match:
+                start_day = int(day_match.group(1))
+                start_date = datetime.date(d.year, d.month, start_day)
+                events.append((start_date, d, summary))
+                return events
         events.append((d, d, summary))
     elif " & " in line and len(matches) == 2:
         for m in matches:

@@ -1,6 +1,6 @@
 # Penrice Academy Calendar Scraper
 
-This repository contains a small Python script that scrapes the term dates published on the [Penrice Academy website](https://www.penriceacademy.org/term-dates) and converts them into a ready‑to‑import iCalendar (``.ics``) file.
+This repository contains a small Python script that scrapes the term dates published on the [Penrice Academy website](https://www.penriceacademy.org/page/?title=Term+Dates&pid=49) and converts them into a ready‑to‑import iCalendar (``.ics``) file.
 
 Running the scraper generates ``penrice.ics`` which can be added to Google Calendar, Outlook, Apple Calendar or any other iCalendar compatible application.
 
@@ -51,7 +51,7 @@ calendar is produced:
 
 | Option | Default | Purpose |
 | ------ | ------- | ------- |
-| `URL` | `"https://www.penriceacademy.org/term-dates"` | Page to scrape for term dates. |
+| `URL` | `"https://www.penriceacademy.org/page/?title=Term+Dates&pid=49"` | Page to scrape for term dates. |
 | `CREATE_SCRAPED_EVENTS` | `True` | Include events parsed directly from the website. |
 | `CREATE_HOLIDAY_EVENTS` | `True` | Infer and add holiday breaks between terms. |
 | `TITLECASE_WORDS` | `"term,holiday,half,INSET"` | Comma separated words that will always appear in Title Case. |
