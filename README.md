@@ -54,7 +54,7 @@ calendar is produced:
 | `URL` | `"https://www.penriceacademy.org/page/?title=Term+Dates&pid=49"` | Page to scrape for term dates. |
 | `CREATE_SCRAPED_EVENTS` | `True` | Include events parsed directly from the website. |
 | `CREATE_HOLIDAY_EVENTS` | `True` | Infer and add holiday breaks between terms. |
-| `TITLECASE_WORDS` | `"term,holiday,half,INSET"` | Comma separated words that will always appear in Title Case. |
+| `TITLECASE_WORDS` | `"term,holiday,half,INSET"` | Comma-separated words that will always appear in Title Case. |
 
 
 ## Customisation
