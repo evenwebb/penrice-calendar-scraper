@@ -6,6 +6,7 @@ an iCalendar (.ics) file that can be imported into calendar applications.
 """
 
 import datetime
+import hashlib
 import logging
 import re
 import time
@@ -39,6 +40,9 @@ CALENDAR_PREFIX = "Penrice"
 PRODID = "-//Penrice Academy//EN"
 OUTPUT_FILENAME = "penrice.ics"
 LOG_FILENAME = "log.txt"
+ICAL_LINE_LENGTH = 75
+ICAL_NEWLINE = "\r\n"
+CALENDAR_TIMEZONE = "Europe/London"
 
 # Half term duration in days (Monday to Friday)
 HALF_TERM_WEEKDAYS = 5
@@ -429,6 +433,26 @@ def _apply_titlecase(summary: str) -> str:
     return pattern.sub(lambda m: m.group(0).title(), summary)
 
 
+def _escape_and_fold_ical_text(text: str, prefix: str = "") -> str:
+    """Escape and fold iCalendar text fields per RFC 5545."""
+    escaped = (
+        text.replace("\\", "\\\\")
+        .replace(";", r"\;")
+        .replace(",", r"\,")
+        .replace("\n", r"\n")
+    )
+    full_line = prefix + escaped
+    if len(full_line) <= ICAL_LINE_LENGTH:
+        return full_line
+
+    result = [full_line[:ICAL_LINE_LENGTH]]
+    remaining = full_line[ICAL_LINE_LENGTH:]
+    while remaining:
+        result.append(" " + remaining[:ICAL_LINE_LENGTH - 1])
+        remaining = remaining[ICAL_LINE_LENGTH - 1:]
+    return ICAL_NEWLINE.join(result)
+
+
 def make_ics_event(
     start: datetime.date,
     end: datetime.date,
@@ -452,14 +476,20 @@ def make_ics_event(
 
     # iCalendar DTEND is exclusive, so add one day
     dtend = end + datetime.timedelta(days=1)
-
-    return (
-        "BEGIN:VEVENT\n"
-        f"DTSTART;VALUE=DATE:{start.strftime('%Y%m%d')}\n"
-        f"DTEND;VALUE=DATE:{dtend.strftime('%Y%m%d')}\n"
-        f"SUMMARY:{prefixed_summary}\n"
-        "END:VEVENT\n"
-    )
+    uid_seed = f"{start.isoformat()}|{end.isoformat()}|{prefixed_summary}"
+    uid = f"{hashlib.sha1(uid_seed.encode('utf-8')).hexdigest()}@penrice-calendar"
+    dtstamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{dtstamp}",
+        f"DTSTART;VALUE=DATE:{start.strftime('%Y%m%d')}",
+        f"DTEND;VALUE=DATE:{dtend.strftime('%Y%m%d')}",
+        _escape_and_fold_ical_text(prefixed_summary, "SUMMARY:"),
+        "END:VEVENT",
+        "",
+    ]
+    return ICAL_NEWLINE.join(lines)
 
 
 # ============================================================================
@@ -583,12 +613,19 @@ def generate_ical(events: list[EventTuple]) -> str:
             event_strings.append(make_ics_event(hstart, hend, hname))
 
     ical = (
-        "BEGIN:VCALENDAR\n"
-        "VERSION:2.0\n"
-        f"PRODID:{PRODID}\n"
-        "CALSCALE:GREGORIAN\n"
+        ICAL_NEWLINE.join(
+            [
+                "BEGIN:VCALENDAR",
+                "VERSION:2.0",
+                f"PRODID:{PRODID}",
+                "CALSCALE:GREGORIAN",
+                "METHOD:PUBLISH",
+                f"X-WR-TIMEZONE:{CALENDAR_TIMEZONE}",
+            ]
+        )
+        + ICAL_NEWLINE
         + "".join(event_strings)
-        + "END:VCALENDAR\n"
+        + f"END:VCALENDAR{ICAL_NEWLINE}"
     )
 
     return ical
