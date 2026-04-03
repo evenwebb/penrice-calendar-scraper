@@ -31,11 +31,16 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install -q -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest tests/ -q
 
       - name: Generate iCal (with retries)
         run: |
@@ -53,7 +58,7 @@ jobs:
             fi
 
             if [ "$attempt" -lt "$ATTEMPTS" ]; then
-              sleep_seconds=$((attempt * 20))
+              sleep_seconds=$((attempt * 10))
               echo "Attempt $attempt failed; retrying in ${sleep_seconds}s..."
               sleep "$sleep_seconds"
             fi

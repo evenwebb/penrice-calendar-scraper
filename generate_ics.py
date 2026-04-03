@@ -10,7 +10,7 @@ import hashlib
 import logging
 import re
 import time
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -32,7 +32,7 @@ TITLECASE_WORDS = ["term", "holiday", "half", "INSET"]
 
 # HTTP request configuration
 DEFAULT_RETRIES = 3
-DEFAULT_TIMEOUT = 60
+DEFAULT_TIMEOUT = 30
 INITIAL_RETRY_DELAY = 1
 
 # iCalendar configuration
@@ -55,6 +55,16 @@ SUMMER_HALF_TERM_MONTHS = {5, 6}
 SUMMER_HOLIDAY_MONTHS = {7, 8}
 AUTUMN_HALF_TERM_MONTHS = {10, 11}
 
+# Substrings (lowercase) for matching site copy when inferring holidays.
+TERM_RESUME_PHRASES = (
+    "term begins",
+    "first day of term",
+)
+END_OF_TERM_PHRASES = (
+    "end of term",
+    "final day of term",
+)
+
 
 # ============================================================================
 # Logging Setup
@@ -68,10 +78,21 @@ logger.addHandler(error_handler)
 
 
 # ============================================================================
-# Type Aliases
+# Event model
 # ============================================================================
 
-EventTuple = tuple[datetime.date, datetime.date, str]
+
+class CalendarEvent(NamedTuple):
+    """One calendar row after parsing a source line."""
+
+    start: datetime.date
+    end: datetime.date
+    summary: str
+    suppress_half_term_week_expand: bool = False
+
+
+# Backwards-compatible name for lists of scraped/normalised events
+EventTuple = CalendarEvent
 
 
 # ============================================================================
@@ -81,7 +102,21 @@ EventTuple = tuple[datetime.date, datetime.date, str]
 DATE_RE = re.compile(
     r"(?P<day>\d{1,2})(?:st|nd|rd|th)?\s+(?P<month>[A-Za-z]+)\s+(?P<year>\d{4})"
 )
+# "Tuesday 1st and Wednesday 2nd September 2026: ..." (two days, one month/year)
+DUAL_DAY_SAME_MONTH_RE = re.compile(
+    r"(\d{1,2})(?:st|nd|rd|th)?\s+and\s+\w+\s+(\d{1,2})(?:st|nd|rd|th)?\s+"
+    r"([A-Za-z]+)\s+(\d{4})"
+)
 MONTH_NAMES = [datetime.date(2000, m, 1).strftime("%B").lower() for m in range(1, 13)]
+
+_TITLECASE_PATTERN: Optional[re.Pattern[str]] = (
+    re.compile(
+        r"\b(" + "|".join(map(re.escape, TITLECASE_WORDS)) + r")\b",
+        re.IGNORECASE,
+    )
+    if TITLECASE_WORDS
+    else None
+)
 
 
 # ============================================================================
@@ -108,17 +143,22 @@ def fetch_with_retries(
         requests.RequestException: If all retry attempts fail
     """
     delay = INITIAL_RETRY_DELAY
-    for attempt in range(retries):
-        try:
-            response = requests.get(url, timeout=timeout)
-            response.raise_for_status()
-            return response
-        except requests.RequestException as exc:
-            logger.warning("Attempt %d failed: %s", attempt + 1, exc)
-            if attempt == retries - 1:
-                raise
-            time.sleep(delay)
-            delay *= 2
+    headers = {
+        "User-Agent": "PenriceTermDatesScraper/1.0 (calendar automation; +https://www.penriceacademy.org/)"
+    }
+    with requests.Session() as session:
+        session.headers.update(headers)
+        for attempt in range(retries):
+            try:
+                response = session.get(url, timeout=timeout)
+                response.raise_for_status()
+                return response
+            except requests.RequestException as exc:
+                logger.warning("Attempt %d failed: %s", attempt + 1, exc)
+                if attempt == retries - 1:
+                    raise
+                time.sleep(delay)
+                delay *= 2
 
     # This should never be reached, but satisfies type checker
     raise requests.RequestException("Failed to fetch URL after all retries")
@@ -127,6 +167,41 @@ def fetch_with_retries(
 # ============================================================================
 # Date Parsing
 # ============================================================================
+
+
+def date_from_parts(
+    day: int,
+    month_str: str,
+    year: int,
+    *,
+    context: str = "",
+) -> Optional[datetime.date]:
+    """
+    Build a calendar date from day, full month name, and year.
+
+    Centralises validation and logging for all structured date construction.
+    """
+    try:
+        month = datetime.datetime.strptime(month_str, "%B").month
+    except ValueError:
+        logger.error(
+            "Unrecognised month '%s'%s",
+            month_str,
+            f" in: {context}" if context else "",
+        )
+        return None
+    try:
+        return datetime.date(year, month, day)
+    except ValueError:
+        logger.error(
+            "Invalid date %s-%s-%s%s",
+            year,
+            month_str,
+            day,
+            f" context: {context}" if context else "",
+        )
+        return None
+
 
 def parse_date(text: str) -> Optional[datetime.date]:
     """
@@ -144,20 +219,8 @@ def parse_date(text: str) -> Optional[datetime.date]:
 
     day = int(match.group("day"))
     month_str = match.group("month")
-
-    try:
-        month = datetime.datetime.strptime(month_str, "%B").month
-    except ValueError:
-        logger.error("Unrecognised month '%s' in line: %s", month_str, text)
-        return None
-
     year = int(match.group("year"))
-
-    try:
-        return datetime.date(year, month, day)
-    except ValueError:
-        logger.error("Invalid date detected in line: %s", text)
-        return None
+    return date_from_parts(day, month_str, year, context=text)
 
 
 # ============================================================================
@@ -182,20 +245,12 @@ def _should_skip_line(line: str) -> bool:
     return any(word in lower_line for word in skip_words)
 
 
-def extract_lines() -> list[str]:
+def extract_lines_from_soup(soup: BeautifulSoup) -> list[str]:
     """
-    Scrape and extract term date lines from the Penrice Academy website.
+    Extract term-date lines from an already-parsed page (no network).
 
-    Returns:
-        List of text lines containing term date information
-
-    Raises:
-        requests.RequestException: If fetching the URL fails
+    Used by tests and by :func:`extract_lines_from_html`.
     """
-    response = fetch_with_retries(URL)
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # Try multiple selectors to find the content section
     content: Optional[Tag] = soup.select_one("section.user-content")
     if not content:
         content = soup.select_one("div.content__region")
@@ -216,6 +271,25 @@ def extract_lines() -> list[str]:
     return lines
 
 
+def extract_lines_from_html(html: str) -> list[str]:
+    """Parse HTML string and return term-date lines (no network)."""
+    return extract_lines_from_soup(BeautifulSoup(html, "html.parser"))
+
+
+def extract_lines() -> list[str]:
+    """
+    Scrape and extract term date lines from the Penrice Academy website.
+
+    Returns:
+        List of text lines containing term date information
+
+    Raises:
+        requests.RequestException: If fetching the URL fails
+    """
+    response = fetch_with_retries(URL)
+    return extract_lines_from_html(response.text)
+
+
 # ============================================================================
 # Event Parsing
 # ============================================================================
@@ -231,15 +305,61 @@ def _clean_event_summary(summary: str) -> str:
         Cleaned summary text
     """
     summary = summary.strip(" -–")
+    summary = re.sub(r"^\s*:\s*", "", summary)
     # Remove trailing "Begins at 3:00pm" text that indicates early finish
     summary = re.sub(r"\s*Begins at 3:00pm\.?$", "", summary, flags=re.IGNORECASE)
     return summary
 
 
+def _canonical_half_term_wording(summary: str) -> str:
+    """Unify hyphenated or spaced 'half term' labels for downstream checks."""
+    return re.sub(r"(?i)half[- ]term", "Half Term", summary)
+
+
+# Half term that starts after school the same day — do not expand to Mon–Fri week.
+_HALF_TERM_AFTERNOON_START = re.compile(
+    r"half[- ]term.*begins\s+at\s+3:00\s*pm",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _suppress_half_term_week_expand_from_tail(tail: str) -> bool:
+    """
+    True when the description after the date(s) marks half term beginning at 3pm.
+
+    Detected on the raw tail before :func:`_clean_event_summary` so we do not
+    depend on the full source line string elsewhere.
+    """
+    return bool(_HALF_TERM_AFTERNOON_START.search(tail))
+
+
+def _try_parse_dual_day_same_month(line: str) -> Optional[list[CalendarEvent]]:
+    """
+    Parse two ordinal days sharing one month/year (inset-style lines on site).
+
+    Example: "Tuesday 1st and Wednesday 2nd September 2026: Staff INSET ..."
+    """
+    match = DUAL_DAY_SAME_MONTH_RE.search(line)
+    if not match:
+        return None
+    day_a, day_b = int(match.group(1)), int(match.group(2))
+    month_str, year_str = match.group(3), match.group(4)
+    year = int(year_str)
+    start = date_from_parts(day_a, month_str, year, context=line)
+    end = date_from_parts(day_b, month_str, year, context=line)
+    if not start or not end:
+        return None
+    if start > end:
+        start, end = end, start
+    tail = line[match.end():]
+    summary = _clean_event_summary(tail)
+    return [CalendarEvent(start, end, summary, False)]
+
+
 def _parse_single_date_event(
     line: str,
     match: re.Match[str]
-) -> list[EventTuple]:
+) -> list[CalendarEvent]:
     """
     Parse events with a single date in the line.
 
@@ -259,22 +379,32 @@ def _parse_single_date_event(
     pre = line[:match.start()]
     left_part = pre.split("-")[0]
 
+    tail = line[match.end():]
+    suppress = _suppress_half_term_week_expand_from_tail(tail)
+
     if "-" in pre and not any(month in left_part.lower() for month in MONTH_NAMES):
         day_match = re.search(r"(\d{1,2})(?:st|nd|rd|th)?", left_part)
         if day_match:
             start_day = int(day_match.group(1))
-            start_date = datetime.date(end_date.year, end_date.month, start_day)
-            summary = _clean_event_summary(line[match.end():])
-            return [(start_date, end_date, summary)]
+            start_date = date_from_parts(
+                start_day,
+                datetime.date(end_date.year, end_date.month, 1).strftime("%B"),
+                end_date.year,
+                context=line,
+            )
+            if not start_date:
+                return []
+            summary = _clean_event_summary(tail)
+            return [CalendarEvent(start_date, end_date, summary, suppress)]
 
-    summary = _clean_event_summary(line[match.end():])
-    return [(end_date, end_date, summary)]
+    summary = _clean_event_summary(tail)
+    return [CalendarEvent(end_date, end_date, summary, suppress)]
 
 
 def _parse_multiple_single_dates(
     line: str,
     matches: list[re.Match[str]]
-) -> list[EventTuple]:
+) -> list[CalendarEvent]:
     """
     Parse events with multiple individual dates (e.g., "1st Jan & 2nd Jan").
 
@@ -285,15 +415,17 @@ def _parse_multiple_single_dates(
     Returns:
         List of (start_date, end_date, summary) tuples
     """
-    summary = _clean_event_summary(line[matches[-1].end():])
-    events: list[EventTuple] = []
+    tail = line[matches[-1].end():]
+    suppress = _suppress_half_term_week_expand_from_tail(tail)
+    summary = _clean_event_summary(tail)
+    events: list[CalendarEvent] = []
 
     for match in matches:
         date = parse_date(match.group(0))
         if not date:
             logger.error("Could not parse date from line: %s", line)
             return []
-        events.append((date, date, summary))
+        events.append(CalendarEvent(date, date, summary, suppress))
 
     return events
 
@@ -301,7 +433,7 @@ def _parse_multiple_single_dates(
 def _parse_date_range_event(
     line: str,
     matches: list[re.Match[str]]
-) -> list[EventTuple]:
+) -> list[CalendarEvent]:
     """
     Parse events with a date range (e.g., "1st Jan - 5th Jan").
 
@@ -319,11 +451,13 @@ def _parse_date_range_event(
         logger.error("Could not parse date range from line: %s", line)
         return []
 
-    summary = _clean_event_summary(line[matches[-1].end():])
-    return [(start_date, end_date, summary)]
+    tail = line[matches[-1].end():]
+    suppress = _suppress_half_term_week_expand_from_tail(tail)
+    summary = _clean_event_summary(tail)
+    return [CalendarEvent(start_date, end_date, summary, suppress)]
 
 
-def parse_event_line(line: str) -> list[EventTuple]:
+def parse_event_line(line: str) -> list[CalendarEvent]:
     """
     Parse event information from a single line of text.
 
@@ -336,18 +470,35 @@ def parse_event_line(line: str) -> list[EventTuple]:
         line: Text line containing event information
 
     Returns:
-        List of (start_date, end_date, summary) tuples
+        List of :class:`CalendarEvent` rows parsed from the line.
     """
+    dual = _try_parse_dual_day_same_month(line)
+    if dual is not None:
+        return dual
+
     matches = list(DATE_RE.finditer(line))
     if not matches:
         return []
 
     if len(matches) == 1:
         return _parse_single_date_event(line, matches[0])
-    elif " & " in line and len(matches) == 2:
-        return _parse_multiple_single_dates(line, matches)
-    else:
+    if " & " in line:
+        if len(matches) == 2:
+            return _parse_multiple_single_dates(line, matches)
+        logger.warning(
+            "Line contains ' & ' but has %d date match(es) (need 2); skipping: %s",
+            len(matches),
+            line[:200],
+        )
+        return []
+    if len(matches) == 2:
         return _parse_date_range_event(line, matches)
+    logger.warning(
+        "Expected exactly 2 dates for a range line, found %d; skipping: %s",
+        len(matches),
+        line[:200],
+    )
+    return []
 
 
 # ============================================================================
@@ -386,7 +537,7 @@ def _expand_half_term_to_week(
     start_date: datetime.date,
     end_date: datetime.date,
     summary: str,
-    line: str
+    suppress_week_expand: bool,
 ) -> tuple[datetime.date, datetime.date]:
     """
     Expand single-day half term events to full week.
@@ -394,14 +545,18 @@ def _expand_half_term_to_week(
     Args:
         start_date: Original start date
         end_date: Original end date
-        summary: Event summary
-        line: Original line text
+        summary: Event summary (half-term wording already canonicalised)
+        suppress_week_expand: When True, half term starts after school the same day
+            (parsed from the raw description tail); do not expand.
 
     Returns:
         Tuple of (expanded_start, expanded_end)
     """
-    # Only expand if it's a single-day half term without "Begins at 3:00pm"
-    if "Half Term" in summary and start_date == end_date and "Begins at 3:00pm" not in line:
+    if (
+        "Half Term" in summary
+        and start_date == end_date
+        and not suppress_week_expand
+    ):
         week_start = start_date - datetime.timedelta(days=start_date.weekday())
         week_end = week_start + datetime.timedelta(days=HALF_TERM_WEEKDAYS - 1)
         return week_start, week_end
@@ -423,14 +578,9 @@ def _apply_titlecase(summary: str) -> str:
     Returns:
         Summary with Title Case applied to configured words
     """
-    if not TITLECASE_WORDS:
+    if _TITLECASE_PATTERN is None:
         return summary
-
-    pattern = re.compile(
-        r"\b(" + "|".join(map(re.escape, TITLECASE_WORDS)) + r")\b",
-        re.IGNORECASE
-    )
-    return pattern.sub(lambda m: m.group(0).title(), summary)
+    return _TITLECASE_PATTERN.sub(lambda m: m.group(0).title(), summary)
 
 
 def _escape_and_fold_ical_text(text: str, prefix: str = "") -> str:
@@ -525,40 +675,57 @@ def guess_holiday_name(start: datetime.date, end: datetime.date) -> str:
     return "Holiday"
 
 
-def infer_holidays(events: list[EventTuple]) -> list[EventTuple]:
+def _is_term_resume_event(summary: str) -> bool:
+    """True if this line marks when the next term starts (students back)."""
+    s = summary.lower()
+    return any(phrase in s for phrase in TERM_RESUME_PHRASES)
+
+
+def _is_end_of_term_for_holiday(summary: str) -> bool:
+    """Last day of teaching before a break (wording varies by year on the site)."""
+    s = summary.lower()
+    return any(phrase in s for phrase in END_OF_TERM_PHRASES)
+
+
+def infer_holidays(events: list[CalendarEvent]) -> list[CalendarEvent]:
     """
-    Infer holiday periods from End of Term and Term Begins events.
+    Infer holiday periods from End of Term and term-start events.
+
+    Matches the next event whose summary indicates term resuming (e.g. Term
+    Begins or First Day of Term). Wording varies by academic year on the site;
+    missing a match pairs summer break with a later year and stretches the
+    holiday incorrectly.
 
     Args:
-        events: List of (start_date, end_date, summary) tuples
+        events: Parsed :class:`CalendarEvent` rows from the site
 
     Returns:
-        List of inferred holiday events
+        Inferred holiday rows (same type; ``suppress_half_term_week_expand`` unused)
     """
-    sorted_events = sorted(events, key=lambda e: e[0])
-    holidays: list[EventTuple] = []
+    sorted_events = sorted(events, key=lambda e: e.start)
+    holidays: list[CalendarEvent] = []
 
-    for i, (start_date, end_date, summary) in enumerate(sorted_events):
-        if "End of Term" not in summary:
+    for i, ev in enumerate(sorted_events):
+        if not _is_end_of_term_for_holiday(ev.summary):
             continue
 
-        # Find the next "Term Begins" event
-        next_start = None
+        # Find the next term-start event (wording differs across published years)
+        next_start: Optional[datetime.date] = None
         for j in range(i + 1, len(sorted_events)):
-            ns, _, ns_summary = sorted_events[j]
-            if "Term Begins" in ns_summary:
-                next_start = ns
+            later = sorted_events[j]
+            if _is_term_resume_event(later.summary):
+                next_start = later.start
                 break
 
         if next_start:
             # Holiday starts the day after term ends
-            hol_start = end_date + datetime.timedelta(days=1)
+            hol_start = ev.end + datetime.timedelta(days=1)
             # Holiday ends the day before term begins
             hol_end = next_start - datetime.timedelta(days=1)
 
             if hol_start <= hol_end:
                 name = guess_holiday_name(hol_start, hol_end)
-                holidays.append((hol_start, hol_end, name))
+                holidays.append(CalendarEvent(hol_start, hol_end, name, False))
 
     return holidays
 
@@ -567,7 +734,7 @@ def infer_holidays(events: list[EventTuple]) -> list[EventTuple]:
 # Main Execution
 # ============================================================================
 
-def process_events(lines: list[str]) -> list[EventTuple]:
+def process_events(lines: list[str]) -> list[CalendarEvent]:
     """
     Process scraped lines into event tuples.
 
@@ -575,24 +742,26 @@ def process_events(lines: list[str]) -> list[EventTuple]:
         lines: Raw text lines from the website
 
     Returns:
-        List of processed event tuples
+        List of processed :class:`CalendarEvent` rows
     """
-    events: list[EventTuple] = []
+    events: list[CalendarEvent] = []
 
     for line in lines:
-        for start, end, summary in parse_event_line(line):
-            # Expand single-day half terms to full week
-            start, end = _expand_half_term_to_week(start, end, summary, line)
-
-            # Normalize half term names with specific seasons
+        for ev in parse_event_line(line):
+            summary = _canonical_half_term_wording(ev.summary)
+            start, end = _expand_half_term_to_week(
+                ev.start,
+                ev.end,
+                summary,
+                ev.suppress_half_term_week_expand,
+            )
             summary = _normalize_half_term_summary(summary, start)
-
-            events.append((start, end, summary))
+            events.append(CalendarEvent(start, end, summary, False))
 
     return events
 
 
-def generate_ical(events: list[EventTuple]) -> str:
+def generate_ical(events: list[CalendarEvent]) -> str:
     """
     Generate iCalendar content from event tuples.
 
@@ -605,12 +774,12 @@ def generate_ical(events: list[EventTuple]) -> str:
     event_strings: list[str] = []
 
     if CREATE_SCRAPED_EVENTS:
-        for start, end, summary in events:
-            event_strings.append(make_ics_event(start, end, summary))
+        for ev in events:
+            event_strings.append(make_ics_event(ev.start, ev.end, ev.summary))
 
     if CREATE_HOLIDAY_EVENTS:
-        for hstart, hend, hname in infer_holidays(events):
-            event_strings.append(make_ics_event(hstart, hend, hname))
+        for hev in infer_holidays(events):
+            event_strings.append(make_ics_event(hev.start, hev.end, hev.summary))
 
     ical = (
         ICAL_NEWLINE.join(
