@@ -22,12 +22,12 @@ jobs:
       CREATE_FAILURE_ISSUE: ${{ secrets.CREATE_FAILURE_ISSUE }}
       SCRAPER_RUN_ATTEMPTS: ${{ secrets.SCRAPER_RUN_ATTEMPTS }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -84,7 +84,7 @@ jobs:
 
       - name: Create or update failure issue
         if: failure() && env.CREATE_FAILURE_ISSUE == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const owner = context.repo.owner;
