@@ -856,6 +856,38 @@ def _html_escape(text: str) -> str:
     return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+def _build_year_overview(events: list) -> str:
+    """Generate monthly calendar blocks with colour-coded days."""
+    import calendar
+    from collections import defaultdict
+    # Build a map of date -> label/type
+    day_map = {}
+    for ev in events:
+        label = ev.summary[:30]
+        if "holiday" in ev.summary.lower() or "half term" in ev.summary.lower():
+            etype = "holiday"
+        elif "inset" in ev.summary.lower():
+            etype = "inset"
+        else:
+            etype = "term"
+        d = ev.start
+        while d <= ev.end:
+            day_map[d] = (label, etype)
+            d += datetime.timedelta(days=1)
+    # Group by month
+    months = defaultdict(list)
+    for d, (label, etype) in sorted(day_map.items()):
+        months[(d.year, d.month)].append((d.day, etype))
+    blocks = []
+    for (year, month), days in sorted(months.items()):
+        mon_name = calendar.month_name[month]
+        day_markers = ""
+        for day, etype in sorted(days, key=lambda x: x[0]):
+            day_markers += f'<span class="ov-day ov-{etype}" title="{mon_name} {day}: {etype}">{day}</span>'
+        blocks.append(f'<div class="ov-month"><div class="ov-month-name">{mon_name} {year}</div><div class="ov-days">{day_markers}</div></div>')
+    return "\n".join(blocks)
+
+
 def build_index_html(events: list) -> str:
     """Generate a stylish single-page HTML site promoting the calendar."""
     now = datetime.datetime.now().strftime("%d %B %Y at %H:%M")
@@ -940,6 +972,13 @@ def build_index_html(events: list) -> str:
         .event-term .event-name{{color:var(--green)}}
         tr:hover{{background:rgba(96,165,250,0.04)}}
 
+        .ov-month{{background:var(--surface2);border-radius:var(--radius-sm);padding:0.75rem 1rem;border:1px solid var(--border)}}
+        .ov-month-name{{font-size:0.82rem;font-weight:600;margin-bottom:0.5rem;color:var(--text)}}
+        .ov-days{{display:flex;flex-wrap:wrap;gap:3px}}
+        .ov-day{{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:4px;font-size:0.65rem;font-family:'JetBrains Mono',monospace;cursor:default}}
+        .ov-term{{background:rgba(74,222,128,0.2);color:var(--green)}}
+        .ov-holiday{{background:rgba(251,191,36,0.2);color:var(--amber)}}
+        .ov-inset{{background:rgba(192,132,252,0.2);color:var(--purple)}}
         footer{{text-align:center;padding:2rem 0;color:var(--muted);font-size:0.85rem;border-top:1px solid var(--border);margin-top:2rem}}
         footer a{{color:var(--accent)}}
         @media(max-width:600px){{.header h1{{font-size:1.6rem}}.container{{padding:1rem}}.sub-buttons{{flex-direction:column}}.sub-btn{{justify-content:center}}}}
@@ -989,6 +1028,14 @@ def build_index_html(events: list) -> str:
                 <thead><tr><th>Date</th><th>Event</th></tr></thead>
                 <tbody>{event_rows if event_rows else '<tr><td colspan="2" style="color:var(--muted)">No upcoming dates found. Check back when the school publishes the new academic year.</td></tr>'}</tbody>
             </table>
+        </div>
+
+        <div class="events-card">
+            <h2>📅 Academic Year Overview</h2>
+            <p style="color:var(--muted);margin-bottom:1rem;font-size:0.9rem">Colour-coded view of the school year. <span style="color:var(--green)">■ Terms</span> · <span style="color:var(--amber)">■ Holidays</span> · <span style="color:var(--purple)">■ INSET Days</span></p>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:0.75rem">
+                {_build_year_overview(sorted_events)}
+            </div>
         </div>
 
         <footer>
