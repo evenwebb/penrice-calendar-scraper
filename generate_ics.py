@@ -38,7 +38,9 @@ INITIAL_RETRY_DELAY = 1
 # iCalendar configuration
 CALENDAR_PREFIX = "Penrice"
 PRODID = "-//Penrice Academy//EN"
+OUTPUT_DIR = "docs"
 OUTPUT_FILENAME = "penrice.ics"
+SITE_URL = "https://evenwebb.github.io/penrice-calendar-scraper"
 LOG_FILENAME = "log.txt"
 ICAL_LINE_LENGTH = 75
 ICAL_NEWLINE = "\r\n"
@@ -307,7 +309,7 @@ def _clean_event_summary(summary: str) -> str:
     summary = summary.strip(" -–")
     summary = re.sub(r"^\s*:\s*", "", summary)
     # Remove trailing "Begins at 3:00pm" text that indicates early finish
-    summary = re.sub(r"\s*Begins at 3:00pm\.?$", "", summary, flags=re.IGNORECASE)
+    summary = re.sub(r"\s*Begins at 3:00\s*pm\.?$", "", summary, flags=re.IGNORECASE)
     return summary
 
 
@@ -636,6 +638,7 @@ def make_ics_event(
         f"DTSTART;VALUE=DATE:{start.strftime('%Y%m%d')}",
         f"DTEND;VALUE=DATE:{dtend.strftime('%Y%m%d')}",
         _escape_and_fold_ical_text(prefixed_summary, "SUMMARY:"),
+        "SEQUENCE:0",
         "END:VEVENT",
         "",
     ]
@@ -683,8 +686,8 @@ def _is_term_resume_event(summary: str) -> bool:
 
 def _is_end_of_term_for_holiday(summary: str) -> bool:
     """Last day of teaching before a break (wording varies by year on the site)."""
-    s = summary.lower()
-    return any(phrase in s for phrase in END_OF_TERM_PHRASES)
+    s = f" {summary.lower()} "
+    return any(f" {phrase} " in s or s.startswith(f"{phrase} ") for phrase in END_OF_TERM_PHRASES)
 
 
 def infer_holidays(events: list[CalendarEvent]) -> list[CalendarEvent]:
@@ -728,6 +731,45 @@ def infer_holidays(events: list[CalendarEvent]) -> list[CalendarEvent]:
                 holidays.append(CalendarEvent(hol_start, hol_end, name, False))
 
     return holidays
+
+
+def infer_inset_days(events: list[CalendarEvent], holidays: list[CalendarEvent]) -> list[CalendarEvent]:
+    """Detect INSET (teacher training) days from gaps before term starts (#18).
+
+    INSET days are typically 1-3 weekdays immediately before a term-resume event
+    that are not already covered by holidays or other events.
+    """
+    all_events = sorted(events + holidays, key=lambda e: e.start)
+    covered_dates: set[datetime.date] = set()
+    for ev in all_events:
+        d = ev.start
+        while d <= ev.end:
+            covered_dates.add(d)
+            d += datetime.timedelta(days=1)
+
+    inset_events: list[CalendarEvent] = []
+    for ev in sorted(events, key=lambda e: e.start):
+        if not _is_term_resume_event(ev.summary):
+            continue
+        # Look backwards from term-resume date for uncovered weekdays
+        inset_days: list[datetime.date] = []
+        check_date = ev.start - datetime.timedelta(days=1)
+        while check_date >= ev.start - datetime.timedelta(days=4):
+            if check_date.weekday() < 5 and check_date not in covered_dates:
+                inset_days.append(check_date)
+            check_date -= datetime.timedelta(days=1)
+
+        if 1 <= len(inset_days) <= 3:
+            inset_days.sort()
+            label = f"INSET Day{'s' if len(inset_days) > 1 else ''}"
+            inset_events.append(CalendarEvent(
+                inset_days[0],
+                inset_days[-1],
+                label,
+                False,
+            ))
+
+    return inset_events
 
 
 # ============================================================================
@@ -778,8 +820,12 @@ def generate_ical(events: list[CalendarEvent]) -> str:
             event_strings.append(make_ics_event(ev.start, ev.end, ev.summary))
 
     if CREATE_HOLIDAY_EVENTS:
-        for hev in infer_holidays(events):
+        holidays = infer_holidays(events)
+        for hev in holidays:
             event_strings.append(make_ics_event(hev.start, hev.end, hev.summary))
+        # INSET day detection (#18): find teacher training days before term starts
+        for iev in infer_inset_days(events, holidays):
+            event_strings.append(make_ics_event(iev.start, iev.end, iev.summary))
 
     ical = (
         ICAL_NEWLINE.join(
@@ -790,6 +836,8 @@ def generate_ical(events: list[CalendarEvent]) -> str:
                 "CALSCALE:GREGORIAN",
                 "METHOD:PUBLISH",
                 f"X-WR-TIMEZONE:{CALENDAR_TIMEZONE}",
+                "REFRESH-INTERVAL;VALUE=DURATION:PT12H",
+                "X-PUBLISHED-TTL:PT12H",
             ]
         )
         + ICAL_NEWLINE
@@ -800,11 +848,166 @@ def generate_ical(events: list[CalendarEvent]) -> str:
     return ical
 
 
-def main() -> None:
-    """
-    Main entry point for the calendar scraper.
+# ============================================================================
+# HTML Landing Page
+# ============================================================================
 
-    Fetches term dates, parses events, and generates an iCalendar file.
+def _html_escape(text: str) -> str:
+    return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def build_index_html(events: list) -> str:
+    """Generate a stylish single-page HTML site promoting the calendar."""
+    now = datetime.datetime.now().strftime("%d %B %Y at %H:%M")
+    ics_url = f"{SITE_URL}/{OUTPUT_FILENAME}"
+    webcal_url = ics_url.replace("https://", "webcal://")
+    gcal_url = f"https://calendar.google.com/calendar/render?cid={ics_url.replace('https://', 'webcal://')}"
+
+    # Sort events by date
+    sorted_events = sorted(events, key=lambda e: e.start)
+    today = datetime.date.today()
+    upcoming = [e for e in sorted_events if e.end >= today]
+    past = [e for e in sorted_events if e.end < today]
+
+    def event_type_label(summary: str) -> str:
+        s = summary.lower()
+        if "holiday" in s or "half term" in s:
+            return "holiday"
+        if "inset" in s:
+            return "inset"
+        return "term"
+
+    event_rows = ""
+    for ev in upcoming[:30]:
+        label = event_type_label(ev.summary)
+        if ev.start == ev.end:
+            date_str = ev.start.strftime("%d %b %Y")
+        else:
+            date_str = f"{ev.start.strftime('%d %b')} – {ev.end.strftime('%d %b %Y')}"
+        event_rows += f"""
+            <tr class="event-{label}">
+                <td class="event-date">{date_str}</td>
+                <td class="event-name">{_html_escape(ev.summary)}</td>
+            </tr>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Penrice Academy — Term Dates Calendar</title>
+    <meta name="description" content="Subscribe to the Penrice Academy term dates and school holiday calendar. Never miss a term start, half term break, or INSET day.">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📅</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        :root{{--bg:#0a0a12;--surface:#12121e;--surface2:#1a1a2c;--border:rgba(139,157,181,0.18);--text:#e4e8f0;--muted:#8b9db5;--accent:#60a5fa;--accent-dim:rgba(96,165,250,0.12);--green:#4ade80;--amber:#fbbf24;--purple:#c084fc;--radius:14px;--radius-sm:8px}}
+        [data-theme="light"]{{--bg:#f8fafc;--surface:#ffffff;--surface2:#f1f5f9;--border:rgba(100,116,139,0.15);--text:#1e293b;--muted:#64748b;--accent:#2563eb;--accent-dim:rgba(37,99,235,0.1);--green:#16a34a;--amber:#d97706;--purple:#9333ea}}
+        *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+        body{{font-family:'Outfit',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;transition:background .2s,color .2s}}
+        .container{{max-width:800px;margin:0 auto;padding:2rem 1.5rem 4rem}}
+        .header{{text-align:center;padding:3rem 0 2.5rem}}
+        .header h1{{font-size:2.2rem;font-weight:700;letter-spacing:-0.02em;margin-bottom:0.5rem}}
+        .header .badge{{display:inline-block;font-size:0.8rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--accent);background:var(--accent-dim);padding:0.3rem 0.85rem;border-radius:100px;margin-bottom:1rem}}
+        .header p{{color:var(--muted);font-size:1.05rem;max-width:500px;margin:0 auto}}
+        .theme-toggle{{position:fixed;top:1rem;right:1rem;background:var(--surface);border:1px solid var(--border);color:var(--text);cursor:pointer;padding:0.45rem 0.8rem;border-radius:8px;font-size:0.85rem;transition:background .15s;z-index:10}}
+        .theme-toggle:hover{{background:var(--surface2)}}
+
+        .subscribe-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:2rem;margin-bottom:2rem;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.2)}}
+        .subscribe-card h2{{font-size:1.3rem;margin-bottom:1.25rem}}
+        .sub-buttons{{display:flex;flex-wrap:wrap;gap:0.75rem;justify-content:center;margin-bottom:1.5rem}}
+        .sub-btn{{display:inline-flex;align-items:center;gap:0.5rem;padding:0.7rem 1.4rem;border-radius:100px;font-weight:600;font-size:0.9rem;text-decoration:none;transition:all .15s;border:1px solid var(--border);background:var(--surface2);color:var(--text)}}
+        .sub-btn:hover{{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.25);border-color:var(--accent)}}
+        .sub-btn.primary{{background:var(--accent);color:#fff;border-color:var(--accent)}}
+        .sub-btn.primary:hover{{background:var(--accent);opacity:0.9}}
+        .sub-url{{font-family:'JetBrains Mono',monospace;font-size:0.82rem;color:var(--muted);word-break:break-all;background:var(--surface2);padding:0.6rem 1rem;border-radius:var(--radius-sm);margin-top:1rem}}
+
+        .instructions{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1.25rem;margin-bottom:2.5rem}}
+        .inst-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem}}
+        .inst-card h3{{font-size:1rem;margin-bottom:0.6rem;display:flex;align-items:center;gap:0.5rem}}
+        .inst-card p,.inst-card ol{{font-size:0.88rem;color:var(--muted);line-height:1.7}}
+        .inst-card ol{{padding-left:1.25rem}}
+        .inst-card li{{margin-bottom:0.3rem}}
+
+        .events-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;margin-bottom:2rem}}
+        .events-card h2{{font-size:1.2rem;margin-bottom:1rem}}
+        table{{width:100%;border-collapse:collapse;font-size:0.9rem}}
+        th{{text-align:left;padding:0.5rem 0.75rem;color:var(--muted);font-weight:500;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.04em;border-bottom:1px solid var(--border)}}
+        td{{padding:0.55rem 0.75rem;border-bottom:1px solid var(--border)}}
+        .event-date{{font-family:'JetBrains Mono',monospace;font-size:0.82rem;white-space:nowrap;color:var(--muted)}}
+        .event-holiday .event-name{{color:var(--amber)}}
+        .event-inset .event-name{{color:var(--purple)}}
+        .event-term .event-name{{color:var(--green)}}
+        tr:hover{{background:rgba(96,165,250,0.04)}}
+
+        footer{{text-align:center;padding:2rem 0;color:var(--muted);font-size:0.85rem;border-top:1px solid var(--border);margin-top:2rem}}
+        footer a{{color:var(--accent)}}
+        @media(max-width:600px){{.header h1{{font-size:1.6rem}}.container{{padding:1rem}}.sub-buttons{{flex-direction:column}}.sub-btn{{justify-content:center}}}}
+    </style>
+</head>
+<body>
+    <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">☀️ 🌙</button>
+    <div class="container">
+        <div class="header">
+            <div class="badge">Cornwall · Education</div>
+            <h1>Penrice Academy<br>Term Dates</h1>
+            <p>Subscribe to stay in sync with school terms, holidays, half term breaks, and INSET days. Updates automatically when the school publishes new dates.</p>
+        </div>
+
+        <div class="subscribe-card">
+            <h2>📅 Subscribe to the Calendar</h2>
+            <div class="sub-buttons">
+                <a href="{webcal_url}" class="sub-btn primary">📱 Add to Apple / iOS</a>
+                <a href="{gcal_url}" class="sub-btn" target="_blank" rel="noopener">🔗 Add to Google Calendar</a>
+                <a href="{OUTPUT_FILENAME}" class="sub-btn" download>💾 Download .ics File</a>
+            </div>
+            <div class="sub-url">{ics_url}</div>
+        </div>
+
+        <div class="instructions">
+            <div class="inst-card">
+                <h3>📱 iPhone / iPad</h3>
+                <ol><li>Tap the <strong>Add to Apple / iOS</strong> button above</li><li>Tap <strong>Subscribe</strong> when prompted</li><li>The calendar appears in your Calendar app</li></ol>
+            </div>
+            <div class="inst-card">
+                <h3>🔗 Google Calendar</h3>
+                <ol><li>Tap <strong>Add to Google Calendar</strong> above</li><li>Sign in if needed</li><li>Confirm to add the calendar</li></ol>
+            </div>
+            <div class="inst-card">
+                <h3>💻 Outlook / Desktop</h3>
+                <ol><li>Click <strong>Download .ics File</strong> above</li><li>Open the downloaded file</li><li>Your calendar app will import it</li></ol>
+            </div>
+            <div class="inst-card">
+                <h3>🔄 Auto-Updates</h3>
+                <p>This calendar checks for new term dates every 24 hours. If you subscribe via the Apple or Google links above, your calendar updates automatically — no need to re-download.</p>
+            </div>
+        </div>
+
+        <div class="events-card">
+            <h2>📋 Upcoming Dates</h2>
+            <table>
+                <thead><tr><th>Date</th><th>Event</th></tr></thead>
+                <tbody>{event_rows if event_rows else '<tr><td colspan="2" style="color:var(--muted)">No upcoming dates found. Check back when the school publishes the new academic year.</td></tr>'}</tbody>
+            </table>
+        </div>
+
+        <footer>
+            <p>Penrice Academy Term Dates Calendar · Updated {now}</p>
+            <p style="margin-top:0.5rem">An open-source fan-made project. <a href="https://github.com/evenwebb/penrice-calendar-scraper">Source on GitHub</a></p>
+        </footer>
+    </div>
+    <script>
+    (function(){{var t=localStorage.getItem('penrice-theme')||(window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');document.documentElement.setAttribute('data-theme',t)}})();
+    function toggleTheme(){{var c=document.documentElement.getAttribute('data-theme');var n=c==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',n);localStorage.setItem('penrice-theme',n)}}
+    </script>
+</body>
+</html>"""
+
+
+def main() -> None:
+    """Main entry point for the calendar scraper.
+
+    Fetches term dates, parses events, and generates an iCalendar file and HTML landing page.
     """
     try:
         lines = extract_lines()
@@ -821,10 +1024,21 @@ def main() -> None:
 
         ical_content = generate_ical(events)
 
-        with open(OUTPUT_FILENAME, "w", encoding="utf-8") as f:
-            f.write(ical_content)
+        # Ensure output directory exists
+        import os
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-        print(f"Created {OUTPUT_FILENAME} with term dates events.")
+        ics_path = os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
+        with open(ics_path, "w", encoding="utf-8") as f:
+            f.write(ical_content)
+        print(f"Created {ics_path} with term dates events.")
+
+        # Generate HTML landing page
+        html = build_index_html(events)
+        html_path = os.path.join(OUTPUT_DIR, "index.html")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"Created {html_path}")
 
     except requests.RequestException as e:
         logger.error("Failed to fetch term dates: %s", e)
