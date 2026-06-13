@@ -8,6 +8,7 @@ an iCalendar (.ics) file that can be imported into calendar applications.
 import datetime
 import hashlib
 import logging
+import os
 import re
 import time
 from typing import NamedTuple, Optional
@@ -1072,7 +1073,6 @@ def main() -> None:
         ical_content = generate_ical(events)
 
         # Ensure output directory exists
-        import os
         os.makedirs(OUTPUT_DIR, exist_ok=True)
 
         ics_path = os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
