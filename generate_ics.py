@@ -5,6 +5,7 @@ This script scrapes term dates from the Penrice Academy website and generates
 an iCalendar (.ics) file that can be imported into calendar applications.
 """
 
+import calendar
 import datetime
 import hashlib
 import logging
@@ -50,6 +51,9 @@ CALENDAR_TIMEZONE = "Europe/London"
 # Half term duration in days (Monday to Friday)
 HALF_TERM_WEEKDAYS = 5
 
+# How many days to look back before a term-resume event for candidate INSET days
+INSET_LOOKBACK_DAYS = 5
+
 # Month mappings for holiday naming
 CHRISTMAS_MONTHS = {12, 1}
 SPRING_HALF_TERM_MONTH = 2
@@ -75,7 +79,7 @@ END_OF_TERM_PHRASES = (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-error_handler = logging.FileHandler(LOG_FILENAME, mode='a', encoding='utf-8')
+error_handler = logging.FileHandler(os.path.join(OUTPUT_DIR, LOG_FILENAME), mode='a', encoding='utf-8')
 error_handler.setLevel(logging.ERROR)
 logger.addHandler(error_handler)
 
@@ -93,9 +97,6 @@ class CalendarEvent(NamedTuple):
     summary: str
     suppress_half_term_week_expand: bool = False
 
-
-# Backwards-compatible name for lists of scraped/normalised events
-EventTuple = CalendarEvent
 
 
 # ============================================================================
@@ -244,8 +245,8 @@ def _should_skip_line(line: str) -> bool:
         return True
 
     lower_line = line.lower()
-    skip_words = ("privacy", "cookies", "updated")
-    return any(word in lower_line for word in skip_words)
+    skip_prefixes = ("privacy", "cookies", "updated")
+    return lower_line.startswith(skip_prefixes)
 
 
 def extract_lines_from_soup(soup: BeautifulSoup) -> list[str]:
@@ -388,17 +389,24 @@ def _parse_single_date_event(
     if "-" in pre and not any(month in left_part.lower() for month in MONTH_NAMES):
         day_match = re.search(r"(\d{1,2})(?:st|nd|rd|th)?", left_part)
         if day_match:
-            start_day = int(day_match.group(1))
-            start_date = date_from_parts(
-                start_day,
-                datetime.date(end_date.year, end_date.month, 1).strftime("%B"),
-                end_date.year,
-                context=line,
-            )
-            if not start_date:
-                return []
-            summary = _clean_event_summary(tail)
-            return [CalendarEvent(start_date, end_date, summary, suppress)]
+            # Validate that the remainder after the day number looks like a
+            # clean day-range separator (e.g. "3rd - 5th January") and not
+            # some other hyphenated text (e.g. "2024-2025 term").
+            remainder = left_part[day_match.end():].strip()
+            if remainder in ("", "-", " -"):
+                start_day = int(day_match.group(1))
+                start_date = date_from_parts(
+                    start_day,
+                    datetime.date(end_date.year, end_date.month, 1).strftime("%B"),
+                    end_date.year,
+                    context=line,
+                )
+                if not start_date:
+                    return []
+                if start_date > end_date:
+                    start_date, end_date = end_date, start_date
+                summary = _clean_event_summary(tail)
+                return [CalendarEvent(start_date, end_date, summary, suppress)]
 
     summary = _clean_event_summary(tail)
     return [CalendarEvent(end_date, end_date, summary, suppress)]
@@ -560,8 +568,17 @@ def _expand_half_term_to_week(
         and start_date == end_date
         and not suppress_week_expand
     ):
-        week_start = start_date - datetime.timedelta(days=start_date.weekday())
-        week_end = week_start + datetime.timedelta(days=HALF_TERM_WEEKDAYS - 1)
+        weekday = start_date.weekday()
+        if weekday == 0:  # Monday — extend forward to Friday
+            week_start = start_date
+            week_end = start_date + datetime.timedelta(days=4)
+        elif weekday == 4:  # Friday — extend backward to Monday
+            week_start = start_date - datetime.timedelta(days=4)
+            week_end = start_date
+        else:
+            # Midweek — anchor to the same week Mon-Fri
+            week_start = start_date - datetime.timedelta(days=weekday)
+            week_end = week_start + datetime.timedelta(days=4)
         return week_start, week_end
 
     return start_date, end_date
@@ -661,19 +678,21 @@ def guess_holiday_name(start: datetime.date, end: datetime.date) -> str:
     Returns:
         Descriptive name for the holiday period
     """
-    month = start.month
+    start_month = start.month
+    end_month = end.month
 
-    if month in CHRISTMAS_MONTHS:
+    # Cross-year Christmas break: December to January
+    if start_month in CHRISTMAS_MONTHS and end_month in CHRISTMAS_MONTHS:
         return "Christmas Holidays"
-    if month == SPRING_HALF_TERM_MONTH:
+    if start_month == SPRING_HALF_TERM_MONTH:
         return "Spring Half Term"
-    if month in EASTER_MONTHS:
+    if start_month in EASTER_MONTHS:
         return "Easter Holiday"
-    if month in SUMMER_HALF_TERM_MONTHS:
+    if start_month in SUMMER_HALF_TERM_MONTHS:
         return "Summer Half Term"
-    if month in SUMMER_HOLIDAY_MONTHS:
+    if start_month in SUMMER_HOLIDAY_MONTHS:
         return "Summer Holidays"
-    if month in AUTUMN_HALF_TERM_MONTHS:
+    if start_month in AUTUMN_HALF_TERM_MONTHS:
         return "Autumn Half Term"
 
     return "Holiday"
@@ -731,7 +750,24 @@ def infer_holidays(events: list[CalendarEvent]) -> list[CalendarEvent]:
                 name = guess_holiday_name(hol_start, hol_end)
                 holidays.append(CalendarEvent(hol_start, hol_end, name, False))
 
-    return holidays
+    # Merge adjacent holidays (handles cross-year Christmas breaks)
+    holidays.sort(key=lambda e: e.start)
+    merged: list[CalendarEvent] = []
+    for h in holidays:
+        if merged:
+            prev = merged[-1]
+            # Adjacent or overlapping: merge into one
+            if h.start <= prev.end + datetime.timedelta(days=1):
+                merged[-1] = CalendarEvent(
+                    prev.start,
+                    max(prev.end, h.end),
+                    guess_holiday_name(prev.start, max(prev.end, h.end)),
+                    False,
+                )
+                continue
+        merged.append(h)
+
+    return merged
 
 
 def infer_inset_days(events: list[CalendarEvent], holidays: list[CalendarEvent]) -> list[CalendarEvent]:
@@ -755,7 +791,7 @@ def infer_inset_days(events: list[CalendarEvent], holidays: list[CalendarEvent])
         # Look backwards from term-resume date for uncovered weekdays
         inset_days: list[datetime.date] = []
         check_date = ev.start - datetime.timedelta(days=1)
-        while check_date >= ev.start - datetime.timedelta(days=4):
+        while check_date >= ev.start - datetime.timedelta(days=INSET_LOOKBACK_DAYS):
             if check_date.weekday() < 5 and check_date not in covered_dates:
                 inset_days.append(check_date)
             check_date -= datetime.timedelta(days=1)
@@ -799,7 +835,7 @@ def process_events(lines: list[str]) -> list[CalendarEvent]:
                 ev.suppress_half_term_week_expand,
             )
             summary = _normalize_half_term_summary(summary, start)
-            events.append(CalendarEvent(start, end, summary, False))
+            events.append(CalendarEvent(start, end, summary, ev.suppress_half_term_week_expand))
 
     return events
 
@@ -859,7 +895,6 @@ def _html_escape(text: str) -> str:
 
 def _build_year_overview(events: list) -> str:
     """Generate monthly calendar blocks with colour-coded days."""
-    import calendar
     from collections import defaultdict
     # Build a map of date -> label/type
     day_map = {}
